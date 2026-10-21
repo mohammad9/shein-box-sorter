@@ -172,6 +172,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
   <section class="view" id="view-customers" hidden>
     <div class="row">
       <button class="btn primary" id="send-scanner">Send to scanner</button>
+      <button class="btn primary" id="send-progress">Send progress</button>
       <button class="btn" id="add-manual">Add customer by pasting</button>
       <button class="btn danger" id="reset-picks">Reset scans</button>
     </div>
@@ -596,10 +597,12 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
   }
 
   // "z" + deflated JSON where the browser can compress, otherwise "j" + plain JSON.
-  async function encodeShare() {
+  async function encodeShare(withPicked) {
     var data = state.customers.map(function (c) {
       return [c.name, COLORS.indexOf(c.color), c.items.map(function (it) {
-        return [it.sku, it.size || "", String(it.name || "").slice(0, 60), shortImg(it.img), it.qty];
+        var row = [it.sku, it.size || "", String(it.name || "").slice(0, 60), shortImg(it.img), it.qty];
+        if (withPicked) row.push(it.picked);
+        return row;
       })];
     });
     var json = JSON.stringify(data);
@@ -616,18 +619,29 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
       return {
         id: "c" + Date.now().toString(36) + i,
         name: c[0], color: COLORS[c[1]] || COLORS[i % COLORS.length],
-        items: c[2].map(function (r) { return { sku: r[0], size: r[1], name: r[2], img: longImg(r[3]), qty: Number(r[4]) || 1, picked: 0 }; })
+        items: c[2].map(function (r) { return { sku: r[0], size: r[1], name: r[2], img: longImg(r[3]), qty: Number(r[4]) || 1, picked: Number(r[5]) || 0 }; })
       };
     });
   }
 
-  document.getElementById("send-scanner").addEventListener("click", async function () {
+  function counts(customers) {
+    var total = 0, picked = 0;
+    customers.forEach(function (c) { c.items.forEach(function (it) { total += it.qty; picked += Math.min(it.picked, it.qty); }); });
+    return { total: total, picked: picked };
+  }
+
+  document.getElementById("send-scanner").addEventListener("click", function () { shareSheet(false); });
+  document.getElementById("send-progress").addEventListener("click", function () { shareSheet(true); });
+
+  async function shareSheet(progress) {
     if (!state.customers.length) { toast("Add at least one customer first"); return; }
-    var link = location.origin + location.pathname + "#load=" + (await encodeShare());
+    var link = location.origin + location.pathname + (progress ? "#progress=" : "#load=") + (await encodeShare(progress));
     var items = state.customers.reduce(function (n, c) { return n + c.items.length; }, 0);
+    var n = counts(state.customers);
     var s = openSheet(
-      '<h2>Send to scanner</h2>' +
-      '<div class="small muted">' + state.customers.length + ' customers · ' + items + ' items. The person who opens this link gets all of them on their phone and can start scanning.</div>' +
+      (progress
+        ? '<h2>Send progress</h2><div class="small muted">' + n.picked + ' of ' + n.total + ' items sorted. Send this link to the person who added the carts. When they open it, their screen shows the same progress.</div>'
+        : '<h2>Send to scanner</h2><div class="small muted">' + state.customers.length + ' customers · ' + items + ' items. The person who opens this link gets all of them on their phone and can start scanning.</div>') +
       '<textarea id="share-link" class="mono" rows="4" readonly style="width:100%;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:8px"></textarea>' +
       '<div class="row"><button class="btn primary" id="share-copy">Copy link</button>' +
       (navigator.share ? '<button class="btn" id="share-native">Share…</button>' : '') +
@@ -644,17 +658,19 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
     var nat = s.querySelector("#share-native");
     if (nat) nat.addEventListener("click", function () { navigator.share({ title: "Box Sorter", url: link }).catch(function () {}); });
     s.querySelector("#share-close").addEventListener("click", closeSheet);
-  });
+  }
 
   async function readLoad() {
     var h = location.hash;
-    if (h.indexOf("#load=") !== 0) return;
+    var isProgress = h.indexOf("#progress=") === 0;
+    if (h.indexOf("#load=") !== 0 && !isProgress) return;
     history.replaceState(null, "", location.pathname + location.search);
     var incoming;
-    try { incoming = await decodeShare(h.slice(6)); } catch (e) {
+    try { incoming = await decodeShare(h.slice(h.indexOf("=") + 1)); } catch (e) {
       toast("This link is incomplete. Ask for the link to be sent again.");
       return;
     }
+    if (isProgress) { showProgress(incoming); return; }
     var items = incoming.reduce(function (n, c) { return n + c.items.length; }, 0);
     var s = openSheet(
       '<h2>Load ' + incoming.length + ' customers (' + items + ' items)?</h2>' +
@@ -672,6 +688,36 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
     });
   }
   window.addEventListener("hashchange", readLoad);
+
+  // Progress sent back from the scanner: show it and copy the counts onto matching customers here.
+  function showProgress(incoming) {
+    var n = counts(incoming);
+    var s = openSheet(
+      '<h2>Scanner progress: ' + n.picked + ' of ' + n.total + ' sorted</h2>' +
+      '<ul class="items">' + incoming.map(function (c) {
+        var k = counts([c]);
+        return '<li><span class="dot" style="background:var(' + c.color + ')"></span><div class="t"><b>' + esc(c.name) + '</b>' +
+          '<span class="muted">' + (k.picked >= k.total ? '✓ Complete' : (k.total - k.picked) + ' missing') + '</span></div>' +
+          '<span class="n">' + k.picked + '/' + k.total + '</span></li>';
+      }).join("") + '</ul>' +
+      '<div class="row"><button class="btn primary" id="pg-yes">Show details</button><button class="btn" id="pg-no">Close</button></div>'
+    );
+    s.querySelector("#pg-no").addEventListener("click", closeSheet);
+    s.querySelector("#pg-yes").addEventListener("click", function () {
+      incoming.forEach(function (inc) {
+        var mine = state.customers.find(function (c) { return c.name === inc.name; });
+        if (!mine) { state.customers.push(inc); return; }
+        inc.items.forEach(function (it, i) {
+          var target = mine.items[i] && mine.items[i].sku === it.sku && mine.items[i].size === it.size ? mine.items[i]
+            : mine.items.find(function (x) { return x.sku === it.sku && x.size === it.size; });
+          if (target) target.picked = it.picked; else mine.items.push(it);
+        });
+      });
+      lastAction = null; save(); closeSheet(); renderSummary();
+      showView("customers");
+      toast("Progress updated");
+    });
+  }
 
   // ---------- import from the Safari button ----------
 
