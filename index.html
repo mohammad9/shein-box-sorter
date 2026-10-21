@@ -1,0 +1,656 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Box Sorter">
+<title>Box Sorter</title>
+<style>
+/* Layout: one-screen phone app — scanner on top, result card, tab bar at the bottom */
+:root {
+  --bg: #f3f4f7;
+  --surface: #ffffff;
+  --fg: #16181d;
+  --muted: #6b7080;
+  --line: #e2e4ea;
+  --accent: #1f5eff;
+  --ok: #138a4a;
+  --warn: #b26a00;
+  --bad: #c62828;
+  --c1: #1f5eff; --c2: #e8590c; --c3: #138a4a; --c4: #8e3ad6; --c5: #d6336c; --c6: #0b8a92;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115; --surface: #191c22; --fg: #eef0f4; --muted: #9aa0ad; --line: #2a2e37;
+    --accent: #5c8bff; --ok: #3ccf7f; --warn: #f0a640; --bad: #ff6b6b;
+    --c1: #5c8bff; --c2: #ff8a3d; --c3: #3ccf7f; --c4: #b57bff; --c5: #ff6b9a; --c6: #2fc4cc;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  display: flex; flex-direction: column;
+  padding-top: env(safe-area-inset-top, 0px);
+}
+button { font: inherit; color: inherit; cursor: pointer; }
+input, textarea { font: inherit; color: var(--fg); }
+header {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px max(16px, env(safe-area-inset-right, 0px)) 10px max(16px, env(safe-area-inset-left, 0px));
+}
+header h1 { font-size: 18px; margin: 0; letter-spacing: -0.01em; }
+header .sub { color: var(--muted); font-size: 13px; }
+main {
+  flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  padding: 0 max(16px, env(safe-area-inset-right, 0px)) 16px max(16px, env(safe-area-inset-left, 0px));
+}
+.view { display: flex; flex-direction: column; gap: 12px; }
+nav.tabs {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  background: var(--surface); border-top: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+nav.tabs button {
+  border: 0; background: none; padding: 12px 4px; font-size: 13px; font-weight: 600; color: var(--muted);
+}
+nav.tabs button[aria-selected="true"] { color: var(--accent); }
+
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+.btn {
+  border: 1px solid var(--line); background: var(--surface); border-radius: 10px;
+  padding: 10px 14px; font-weight: 600;
+}
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.danger { color: var(--bad); }
+.btn:focus-visible, nav.tabs button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
+
+/* scanner */
+#reader-wrap { position: relative; border-radius: 14px; overflow: hidden; background: #000; min-height: 180px; }
+#reader { width: 100%; }
+#reader video { width: 100% !important; display: block; }
+#cam-off {
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; color: #fff; text-align: center; padding: 16px;
+}
+.manual { display: flex; gap: 8px; }
+.manual input {
+  flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+}
+
+/* result */
+#result { border-width: 2px; transition: border-color .2s; }
+#result .who { font-size: 30px; font-weight: 800; line-height: 1.1; letter-spacing: -0.02em; }
+#result .what { display: flex; gap: 12px; align-items: center; margin-top: 10px; }
+#result img { width: 56px; height: 56px; object-fit: cover; border-radius: 8px; flex: none; background: var(--line); }
+#result .what > div { min-width: 0; }
+.pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; color: #fff; }
+.choices { display: grid; gap: 8px; margin-top: 12px; }
+.choices button {
+  text-align: left; border: 2px solid; border-radius: 10px; padding: 10px 12px; background: var(--surface); font-weight: 700;
+}
+
+/* customers */
+.cust-head { display: flex; align-items: center; gap: 10px; }
+.dot { width: 14px; height: 14px; border-radius: 50%; flex: none; }
+.cust-head h3 { margin: 0; font-size: 17px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin: 10px 0 6px; }
+.bar > i { display: block; height: 100%; border-radius: 3px; }
+.items { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.items li { display: flex; gap: 10px; align-items: center; font-size: 13px; }
+.items li img { width: 36px; height: 36px; object-fit: cover; border-radius: 6px; flex: none; background: var(--line); }
+.items li .t { flex: 1; min-width: 0; }
+.items li .t b { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.items li .n { font-variant-numeric: tabular-nums; font-weight: 700; }
+.items li.done { opacity: .5; }
+details summary { cursor: pointer; color: var(--accent); font-weight: 600; font-size: 13px; margin-top: 6px; }
+
+/* modal */
+.modal {
+  position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: flex-end; justify-content: center; z-index: 20;
+}
+.modal .sheet {
+  background: var(--surface); width: 100%; max-width: 520px; border-radius: 18px 18px 0 0;
+  padding: 18px max(16px, env(safe-area-inset-right, 0px)) calc(18px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+  display: flex; flex-direction: column; gap: 12px; max-height: 90%; overflow-y: auto;
+}
+.modal h2 { margin: 0; font-size: 19px; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field input, .field textarea {
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
+}
+.colors { display: flex; gap: 10px; flex-wrap: wrap; }
+.colors button { width: 34px; height: 34px; border-radius: 50%; border: 3px solid transparent; }
+.colors button[aria-pressed="true"] { border-color: var(--fg); }
+ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
+.toast {
+  position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(70px + env(safe-area-inset-bottom, 0px));
+  background: var(--fg); color: var(--bg); padding: 8px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; z-index: 30;
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Box Sorter</h1>
+    <div class="sub" id="summary">No customers yet</div>
+  </div>
+  <button class="btn" id="undo-btn" hidden>Undo</button>
+</header>
+
+<main>
+  <!-- SCAN -->
+  <section class="view" id="view-scan">
+    <div id="reader-wrap">
+      <div id="reader"></div>
+      <div id="cam-off">
+        <div>Point the camera at the barcode on the product label.</div>
+        <button class="btn primary" id="cam-start">Start camera</button>
+      </div>
+    </div>
+    <form class="manual" id="manual-form">
+      <input id="manual-input" placeholder="Or type the code, e.g. sa2507089301…" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button class="btn" type="submit">Find</button>
+    </form>
+    <div class="card" id="result">
+      <div class="muted">Scan a product to see which customer it belongs to.</div>
+    </div>
+  </section>
+
+  <!-- CUSTOMERS -->
+  <section class="view" id="view-customers" hidden>
+    <div class="row">
+      <button class="btn primary" id="add-manual">Add customer by pasting</button>
+      <button class="btn danger" id="reset-picks">Reset scans</button>
+    </div>
+    <div id="cust-list" class="view"></div>
+  </section>
+
+  <!-- SETUP -->
+  <section class="view" id="view-setup" hidden>
+    <div class="card">
+      <h3 style="margin-top:0">Add a customer's cart</h3>
+      <ol class="steps">
+        <li>Copy the customer's Shein cart link.</li>
+        <li>Open <b>Safari</b>, paste the link into the address bar and go. If Safari asks to open the SHEIN app, tap <b>Cancel</b>.</li>
+        <li>If Shein shows a "confirm you're human" box, tick it and wait until you see the products.</li>
+        <li>Open your bookmarks and tap <b>Get SKUs</b>. This app opens with the cart's items.</li>
+        <li>Type the customer's name and tap <b>Add</b>.</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">One-time: install the "Get SKUs" button</h3>
+      <ol class="steps">
+        <li>Tap <b>Copy button code</b> below.</li>
+        <li>In Safari tap the Share icon, then <b>Add Bookmark</b>. Name it <b>Get SKUs</b> and save.</li>
+        <li>Open Bookmarks, tap <b>Edit</b>, tap <b>Get SKUs</b>, clear the address and paste the copied code. Tap Done.</li>
+      </ol>
+      <div class="row" style="margin-top:12px">
+        <button class="btn primary" id="copy-bm">Copy button code</button>
+      </div>
+      <details>
+        <summary>Show the code</summary>
+        <textarea id="bm-code" class="mono" rows="6" readonly style="width:100%;margin-top:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:8px"></textarea>
+      </details>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">Tips</h3>
+      <ul class="steps" style="padding-left:20px;margin:0">
+        <li>Add this app to your Home Screen (Share → Add to Home Screen) to open it like an app.</li>
+        <li>Everything is saved on this phone only.</li>
+        <li>If a product has the same SKU for two customers in different sizes, the app asks you which size the label shows.</li>
+      </ul>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" id="load-demo">Load demo customers</button>
+        <button class="btn danger" id="clear-all">Delete all customers</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<nav class="tabs" role="tablist">
+  <button role="tab" data-view="scan" aria-selected="true">Scan</button>
+  <button role="tab" data-view="customers" aria-selected="false">Customers</button>
+  <button role="tab" data-view="setup" aria-selected="false">Setup</button>
+</nav>
+
+<div id="modal-root"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var STORE_KEY = "boxSorter.v1";
+  var COLORS = ["--c1", "--c2", "--c3", "--c4", "--c5", "--c6"];
+  var COLOR_NAMES = { "--c1": "Blue", "--c2": "Orange", "--c3": "Green", "--c4": "Purple", "--c5": "Pink", "--c6": "Teal" };
+
+  // ---------- state ----------
+
+  var state = load();
+  var lastAction = null; // { custId, itemIdx } for undo
+
+  function load() {
+    try {
+      var s = JSON.parse(localStorage.getItem(STORE_KEY));
+      if (s && Array.isArray(s.customers)) return s;
+    } catch (e) { /* storage unavailable */ }
+    return { customers: [] };
+  }
+  function save() {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* storage unavailable */ }
+  }
+  function color(c) { return "var(" + c.color + ")"; }
+  function norm(code) { return String(code || "").trim().toLowerCase().replace(/\s+/g, ""); }
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (ch) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+    });
+  }
+  function imgSrc(u) { return u ? (u.indexOf("//") === 0 ? "https:" + u : u) : ""; }
+
+  // ---------- feedback ----------
+
+  var audioCtx = null;
+  function beep(ok) {
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      var o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.frequency.value = ok ? 880 : 220;
+      o.type = ok ? "sine" : "square";
+      g.gain.value = 0.08;
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(); o.stop(audioCtx.currentTime + (ok ? 0.12 : 0.35));
+    } catch (e) { /* no audio */ }
+  }
+  function toast(msg) {
+    var t = document.createElement("div");
+    t.className = "toast"; t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(function () { t.remove(); }, 2200);
+  }
+
+  // ---------- tabs ----------
+
+  var tabs = document.querySelectorAll("nav.tabs button");
+  function showView(name) {
+    tabs.forEach(function (b) { b.setAttribute("aria-selected", String(b.dataset.view === name)); });
+    ["scan", "customers", "setup"].forEach(function (v) {
+      document.getElementById("view-" + v).hidden = v !== name;
+    });
+    if (name === "customers") renderCustomers();
+    if (name !== "scan") stopCamera();
+  }
+  tabs.forEach(function (b) { b.addEventListener("click", function () { showView(b.dataset.view); }); });
+
+  // ---------- summary ----------
+
+  function renderSummary() {
+    var total = 0, picked = 0;
+    state.customers.forEach(function (c) {
+      c.items.forEach(function (it) { total += it.qty; picked += Math.min(it.picked, it.qty); });
+    });
+    document.getElementById("summary").textContent = state.customers.length
+      ? state.customers.length + " customers · " + picked + " of " + total + " items sorted"
+      : "No customers yet. Add one from Setup.";
+    document.getElementById("undo-btn").hidden = !lastAction;
+  }
+
+  // ---------- matching ----------
+
+  function findMatches(code) {
+    var c = norm(code), out = [];
+    if (c.length < 6) return out;
+    state.customers.forEach(function (cust) {
+      cust.items.forEach(function (it, idx) {
+        var s = norm(it.sku);
+        if (s && (s === c || (c.length >= 10 && (c.indexOf(s) >= 0 || s.indexOf(c) >= 0)))) {
+          out.push({ cust: cust, item: it, idx: idx });
+        }
+      });
+    });
+    return out;
+  }
+
+  function handleCode(code) {
+    var matches = findMatches(code);
+    var box = document.getElementById("result");
+    if (!matches.length) {
+      beep(false);
+      box.style.borderColor = "var(--bad)";
+      box.innerHTML = '<div class="who" style="color:var(--bad)">Not in any cart</div>' +
+        '<div class="small muted" style="margin-top:6px">Scanned code:</div><div class="mono">' + esc(code) + '</div>' +
+        '<div class="small muted" style="margin-top:6px">Check that this customer\'s cart was added, or that the right barcode was scanned.</div>';
+      return;
+    }
+    var open = matches.filter(function (m) { return m.item.picked < m.item.qty; });
+    if (!open.length) {
+      beep(false);
+      box.style.borderColor = "var(--warn)";
+      box.innerHTML = '<div class="who" style="color:var(--warn)">Extra item</div>' +
+        '<div class="small" style="margin-top:6px">Everyone who ordered this already has it:</div>' +
+        matches.map(function (m) {
+          return '<div class="small"><span class="pill" style="background:' + color(m.cust) + '">' + esc(m.cust.name) + '</span> ' +
+            esc(m.item.size) + ' · ' + m.item.picked + '/' + m.item.qty + '</div>';
+        }).join("") + itemBlock(matches[0].item);
+      return;
+    }
+    if (open.length === 1) { assign(open[0]); return; }
+
+    // Same SKU wanted by more than one line: let the user pick by size / customer.
+    beep(true);
+    box.style.borderColor = "var(--accent)";
+    box.innerHTML = '<div class="who">Which one?</div>' +
+      '<div class="small muted" style="margin-top:4px">Check the size on the label.</div>' +
+      itemBlock(open[0].item) +
+      '<div class="choices">' + open.map(function (m, i) {
+        return '<button data-i="' + i + '" style="border-color:' + color(m.cust) + '">' +
+          '<span style="color:' + color(m.cust) + '">' + esc(m.cust.name) + '</span> · size ' + esc(m.item.size) +
+          ' <span class="muted small">(' + m.item.picked + '/' + m.item.qty + ')</span></button>';
+      }).join("") + '</div>';
+    box.querySelectorAll(".choices button").forEach(function (b) {
+      b.addEventListener("click", function () { assign(open[Number(b.dataset.i)], true); });
+    });
+  }
+
+  function itemBlock(it) {
+    return '<div class="what">' + (it.img ? '<img alt="" src="' + esc(imgSrc(it.img)) + '">' : '') +
+      '<div><div class="small" style="font-weight:600">' + esc(it.name || it.sku) + '</div>' +
+      '<div class="small muted">Size ' + esc(it.size || "–") + '</div><div class="mono muted">' + esc(it.sku) + '</div></div></div>';
+  }
+
+  function assign(m, silent) {
+    m.item.picked += 1;
+    lastAction = { custId: m.cust.id, idx: m.idx };
+    save();
+    if (!silent) beep(true);
+    var left = 0, total = 0;
+    m.cust.items.forEach(function (it) { total += it.qty; left += Math.max(0, it.qty - it.picked); });
+    var box = document.getElementById("result");
+    box.style.borderColor = color(m.cust);
+    box.innerHTML = '<div class="small muted">Put this in the pile for</div>' +
+      '<div class="who" style="color:' + color(m.cust) + '">→ ' + esc(m.cust.name) + '</div>' +
+      '<div class="small" style="margin-top:4px"><span class="pill" style="background:' + color(m.cust) + '">' +
+      COLOR_NAMES[m.cust.color] + ' pile</span> ' +
+      (left ? left + ' of ' + total + ' items still missing' : '<b style="color:var(--ok)">✓ This customer is complete</b>') + '</div>' +
+      itemBlock(m.item);
+    renderSummary();
+  }
+
+  document.getElementById("undo-btn").addEventListener("click", function () {
+    if (!lastAction) return;
+    var cust = state.customers.find(function (c) { return c.id === lastAction.custId; });
+    if (cust && cust.items[lastAction.idx] && cust.items[lastAction.idx].picked > 0) {
+      cust.items[lastAction.idx].picked -= 1;
+      save();
+      toast("Last scan undone for " + cust.name);
+    }
+    lastAction = null;
+    document.getElementById("result").innerHTML = '<div class="muted">Scan a product to see which customer it belongs to.</div>';
+    document.getElementById("result").style.borderColor = "";
+    renderSummary();
+  });
+
+  document.getElementById("manual-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var v = document.getElementById("manual-input").value;
+    if (v.trim()) handleCode(v);
+    document.getElementById("manual-input").value = "";
+  });
+
+  // ---------- camera ----------
+
+  var scanner = null, lastCode = "", lastTime = 0;
+  function startCamera() {
+    if (!window.Html5Qrcode) { toast("Scanner failed to load. Check your internet."); return; }
+    beep(true); // unlock audio on iOS from this tap
+    var F = window.Html5QrcodeSupportedFormats;
+    scanner = scanner || new Html5Qrcode("reader", {
+      formatsToSupport: [F.CODE_128, F.CODE_39, F.CODE_93, F.EAN_13, F.EAN_8, F.UPC_A, F.ITF, F.QR_CODE, F.DATA_MATRIX],
+      verbose: false
+    });
+    scanner.start(
+      { facingMode: "environment" },
+      { fps: 12, qrbox: function (w, h) { return { width: Math.floor(w * 0.9), height: Math.floor(Math.min(h * 0.45, 160)) }; } },
+      function (text) {
+        var now = Date.now();
+        if (text === lastCode && now - lastTime < 3000) return;
+        lastCode = text; lastTime = now;
+        handleCode(text);
+      },
+      function () { /* no code in this frame */ }
+    ).then(function () {
+      document.getElementById("cam-off").hidden = true;
+    }).catch(function (err) {
+      toast("Camera blocked. Allow camera access for this site in Safari settings.");
+      console.warn(err);
+    });
+  }
+  function stopCamera() {
+    if (scanner && scanner.isScanning) {
+      scanner.stop().catch(function () {});
+      document.getElementById("cam-off").hidden = false;
+    }
+  }
+  document.getElementById("cam-start").addEventListener("click", startCamera);
+  document.addEventListener("visibilitychange", function () { if (document.hidden) stopCamera(); });
+
+  // ---------- customers view ----------
+
+  function renderCustomers() {
+    var list = document.getElementById("cust-list");
+    if (!state.customers.length) {
+      list.innerHTML = '<div class="card muted">No customers yet. Follow the steps in <b>Setup</b> to add each customer\'s cart.</div>';
+      return;
+    }
+    list.innerHTML = state.customers.map(function (c) {
+      var total = 0, picked = 0;
+      c.items.forEach(function (it) { total += it.qty; picked += Math.min(it.picked, it.qty); });
+      var pct = total ? Math.round(picked / total * 100) : 0;
+      var missing = c.items.filter(function (it) { return it.picked < it.qty; });
+      var done = c.items.filter(function (it) { return it.picked >= it.qty; });
+      return '<div class="card">' +
+        '<div class="cust-head"><span class="dot" style="background:' + color(c) + '"></span><h3>' + esc(c.name) + '</h3>' +
+        '<span class="small" style="font-variant-numeric:tabular-nums">' + picked + '/' + total + '</span></div>' +
+        '<div class="bar"><i style="width:' + pct + '%;background:' + color(c) + '"></i></div>' +
+        '<div class="small ' + (missing.length ? 'muted' : '') + '" style="' + (missing.length ? '' : 'color:var(--ok);font-weight:700') + '">' +
+        (missing.length ? missing.length + ' item' + (missing.length > 1 ? 's' : '') + ' still missing' : '✓ Complete') + '</div>' +
+        '<details' + (missing.length && missing.length <= 6 ? ' open' : '') + '><summary>Items</summary><ul class="items">' +
+        missing.concat(done).map(function (it) {
+          return '<li class="' + (it.picked >= it.qty ? 'done' : '') + '">' +
+            (it.img ? '<img alt="" loading="lazy" src="' + esc(imgSrc(it.img)) + '">' : '<img alt="">') +
+            '<div class="t"><b>' + esc(it.name || it.sku) + '</b><span class="muted">Size ' + esc(it.size || '–') + ' · <span class="mono">' + esc(it.sku) + '</span></span></div>' +
+            '<span class="n">' + it.picked + '/' + it.qty + '</span></li>';
+        }).join("") + '</ul></details>' +
+        '<div class="row" style="margin-top:10px"><button class="btn danger small" data-del="' + esc(c.id) + '">Remove customer</button></div>' +
+        '</div>';
+    }).join("");
+    list.querySelectorAll("[data-del]").forEach(function (b) {
+      b.addEventListener("click", function () { confirmSheet("Remove this customer and their items?", "Remove", function () {
+        state.customers = state.customers.filter(function (c) { return c.id !== b.dataset.del; });
+        save(); renderCustomers(); renderSummary();
+      }); });
+    });
+  }
+
+  document.getElementById("reset-picks").addEventListener("click", function () {
+    confirmSheet("Set every customer back to 0 scanned items?", "Reset", function () {
+      state.customers.forEach(function (c) { c.items.forEach(function (it) { it.picked = 0; }); });
+      lastAction = null; save(); renderCustomers(); renderSummary();
+    });
+  });
+  document.getElementById("clear-all").addEventListener("click", function () {
+    confirmSheet("Delete all customers from this phone?", "Delete all", function () {
+      state.customers = []; lastAction = null; save(); renderSummary(); toast("All customers deleted");
+    });
+  });
+
+  // ---------- sheets ----------
+
+  function openSheet(html) {
+    var root = document.getElementById("modal-root");
+    root.innerHTML = '<div class="modal"><div class="sheet">' + html + '</div></div>';
+    root.querySelector(".modal").addEventListener("click", function (e) { if (e.target.classList.contains("modal")) closeSheet(); });
+    return root.querySelector(".sheet");
+  }
+  function closeSheet() { document.getElementById("modal-root").innerHTML = ""; }
+  function confirmSheet(msg, label, onYes) {
+    var s = openSheet('<h2>' + esc(msg) + '</h2><div class="row"><button class="btn danger" id="cs-yes">' + esc(label) +
+      '</button><button class="btn" id="cs-no">Cancel</button></div>');
+    s.querySelector("#cs-yes").addEventListener("click", function () { closeSheet(); onYes(); });
+    s.querySelector("#cs-no").addEventListener("click", closeSheet);
+  }
+
+  function nextColor() {
+    var used = state.customers.map(function (c) { return c.color; });
+    return COLORS.find(function (c) { return used.indexOf(c) < 0; }) || COLORS[state.customers.length % COLORS.length];
+  }
+
+  function addCustomerSheet(items, fromLink) {
+    var chosen = nextColor();
+    var s = openSheet(
+      '<h2>' + (fromLink ? 'Cart imported: ' + items.length + ' items' : 'Add customer') + '</h2>' +
+      '<div class="field"><label for="ac-name">Customer name</label><input id="ac-name" autocomplete="off" placeholder="e.g. Sara"></div>' +
+      (fromLink ? '' : '<div class="field"><label for="ac-paste">Paste the items (one per line: SKU size)</label>' +
+        '<textarea id="ac-paste" rows="6" class="mono" placeholder="sa25070893018031222 0-1M"></textarea></div>') +
+      '<div class="field"><span>Pile color</span><div class="colors">' + COLORS.map(function (c) {
+        return '<button type="button" data-c="' + c + '" aria-label="' + COLOR_NAMES[c] + '" aria-pressed="' + (c === chosen) + '" style="background:var(' + c + ')"></button>';
+      }).join("") + '</div></div>' +
+      (fromLink ? '<ul class="items" style="max-height:200px;overflow:auto">' + items.slice(0, 50).map(function (it) {
+        return '<li>' + (it.img ? '<img alt="" src="' + esc(imgSrc(it.img)) + '">' : '<img alt="">') +
+          '<div class="t"><b>' + esc(it.name || it.sku) + '</b><span class="muted">Size ' + esc(it.size) + ' · ×' + it.qty + '</span></div></li>';
+      }).join("") + '</ul>' : '') +
+      '<div class="row"><button class="btn primary" id="ac-add">Add</button><button class="btn" id="ac-cancel">Cancel</button></div>'
+    );
+    s.querySelectorAll(".colors button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        chosen = b.dataset.c;
+        s.querySelectorAll(".colors button").forEach(function (x) { x.setAttribute("aria-pressed", String(x === b)); });
+      });
+    });
+    s.querySelector("#ac-cancel").addEventListener("click", closeSheet);
+    s.querySelector("#ac-add").addEventListener("click", function () {
+      var name = s.querySelector("#ac-name").value.trim();
+      if (!name) { s.querySelector("#ac-name").focus(); toast("Type the customer's name"); return; }
+      var list = items;
+      if (!fromLink) {
+        list = s.querySelector("#ac-paste").value.split(/\n+/).map(function (line) {
+          var p = line.trim().split(/\s+/);
+          return p[0] ? { sku: p[0], size: p[1] || "", name: "", img: "", qty: Number(p[2]) || 1 } : null;
+        }).filter(Boolean);
+        if (!list.length) { toast("Paste at least one SKU"); return; }
+      }
+      state.customers.push({
+        id: "c" + Date.now().toString(36),
+        name: name, color: chosen,
+        items: list.map(function (it) { return { sku: it.sku, size: it.size, name: it.name, img: it.img, qty: it.qty || 1, picked: 0 }; })
+      });
+      save(); closeSheet(); renderSummary();
+      toast(name + " added with " + list.length + " items");
+      showView("customers");
+    });
+    setTimeout(function () { var n = s.querySelector("#ac-name"); if (n) n.focus(); }, 50);
+  }
+  document.getElementById("add-manual").addEventListener("click", function () { addCustomerSheet([], false); });
+
+  // ---------- import from the Safari button ----------
+
+  function readImport() {
+    var h = location.hash;
+    if (h.indexOf("#import=") !== 0) return;
+    try {
+      var data = JSON.parse(decodeURIComponent(h.slice(8)));
+      var items = (data.items || data).map(function (r) {
+        return Array.isArray(r) ? { sku: r[0], size: r[1], name: r[2], img: r[3], qty: Number(r[4]) || 1 } : r;
+      }).filter(function (it) { return it && it.sku; });
+      history.replaceState(null, "", location.pathname + location.search);
+      if (!items.length) { toast("No items found in that cart"); return; }
+      addCustomerSheet(items, true);
+    } catch (e) {
+      toast("Couldn't read the cart data. Try the Get SKUs button again.");
+    }
+  }
+  window.addEventListener("hashchange", readImport);
+
+  // ---------- bookmarklet ----------
+
+  // Runs on the Shein cart share page. Finds the cart component Vue renders and sends
+  // each product's SKU (goods_sn), size, name and image back to this app.
+  function grabber(APP) {
+    var root = document.getElementById("app");
+    var seen = new Set();
+    var found = null;
+    function walk(v, d) {
+      if (!v || found || d > 400) return;
+      var c = v.component;
+      if (c && !seen.has(c)) {
+        seen.add(c);
+        var ss = c.setupState;
+        try { if (ss && ss.normalProducts && ss.normalProducts.length) { found = ss; return; } } catch (e) {}
+        walk(c.subTree, d + 1);
+      }
+      if (Array.isArray(v.children)) v.children.forEach(function (x) { walk(x, d + 1); });
+      if (v.dynamicChildren) v.dynamicChildren.forEach(function (x) { walk(x, d + 1); });
+      if (v.suspense) walk(v.suspense.activeBranch, d + 1);
+    }
+    walk(root && root._vnode, 0);
+    if (!found) { alert("No cart found on this page. Open the customer's Shein cart link first and wait until the products show."); return; }
+    var list = [].concat(found.normalProducts || [], found.outStock || [], found.unavailable || []);
+    var rows = list.map(function (p) {
+      var size = String(p.goodsAttr || "").split("/").pop().trim();
+      var qty = p.quantity || (p.product && p.product.quantity) || 1;
+      return [p.goods_sn, size, String(p.goods_name || "").slice(0, 70), p.goods_img || "", qty];
+    }).filter(function (r) { return r[0]; });
+    location.href = APP + String.fromCharCode(35) + "import=" + encodeURIComponent(JSON.stringify(rows));
+  }
+
+  function bookmarkletCode() {
+    var app = location.origin + location.pathname;
+    var src = grabber.toString().replace(/\s*\n\s*/g, " ");
+    return "javascript:(" + src + ")(" + JSON.stringify(app) + ");void 0";
+  }
+  document.getElementById("bm-code").value = bookmarkletCode();
+  document.getElementById("copy-bm").addEventListener("click", function () {
+    var code = bookmarkletCode();
+    var ta = document.getElementById("bm-code");
+    var done = function () { toast("Copied. Now paste it into the bookmark's address."); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(code).then(done, function () { ta.closest("details").open = true; ta.select(); });
+    } else { ta.closest("details").open = true; ta.select(); document.execCommand("copy"); done(); }
+  });
+
+  // ---------- demo ----------
+
+  document.getElementById("load-demo").addEventListener("click", function () {
+    var demo = [
+      ["Demo – Sara", "sa25070893018031222 0-1M\nsa25080198887186332 1-3M\nsa260718211849698155579 12-18M\nsi2406117222258541 XL"],
+      ["Demo – Noor", "sa25062088980812096 1-3M\nsa260718211849698155579 1-3M\nsi2407305448946722 M"],
+      ["Demo – Huda", "sk260611161636652979632 0-6M\nsk2408261654265556 0-6M"]
+    ];
+    demo.forEach(function (d) {
+      state.customers.push({
+        id: "c" + Math.random().toString(36).slice(2, 8), name: d[0], color: nextColor(),
+        items: d[1].split("\n").map(function (l) { var p = l.split(" "); return { sku: p[0], size: p[1], name: "", img: "", qty: 1, picked: 0 }; })
+      });
+    });
+    save(); renderSummary(); toast("Demo customers added"); showView("customers");
+  });
+
+  // ---------- boot ----------
+
+  renderSummary();
+  readImport();
+})();
+</script>
+</body>
+</html>
