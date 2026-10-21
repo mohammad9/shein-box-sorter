@@ -76,8 +76,16 @@ nav.tabs button[aria-selected="true"] { color: var(--accent); }
 
 /* scanner */
 #reader-wrap { position: relative; border-radius: 14px; overflow: hidden; background: #000; min-height: 180px; }
-#reader { width: 100%; }
-#reader video { width: 100% !important; display: block; }
+#cam { width: 100%; display: block; min-height: 180px; max-height: 55vh; object-fit: cover; }
+/* The box the text must sit in; its position is mirrored in GUIDE below for cropping. */
+#guide {
+  position: absolute; left: 6%; right: 6%; top: 42%; height: 16%;
+  border: 3px solid #fff; border-radius: 8px; box-shadow: 0 0 0 9999px rgba(0,0,0,.4);
+}
+#guide-hint {
+  position: absolute; left: 0; right: 0; top: calc(58% + 8px); text-align: center; color: #fff;
+  font-size: 13px; font-weight: 600; padding: 0 16px; text-shadow: 0 1px 2px #000;
+}
 #cam-off {
   position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 10px; color: #fff; text-align: center; padding: 16px;
@@ -138,7 +146,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
-<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 </head>
 <body>
 <header>
@@ -153,14 +161,17 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
   <!-- SCAN -->
   <section class="view" id="view-scan">
     <div id="reader-wrap">
-      <div id="reader"></div>
+      <video id="cam" playsinline muted></video>
+      <div id="guide" hidden></div>
+      <div id="guide-hint" hidden>Fit the code printed under the barcode (sk…, sh…) inside the white box</div>
       <div id="cam-off">
-        <div>Point the camera at the barcode on the product label.</div>
+        <div>The camera reads the code printed under the barcode, like <b>sk25061715165400395</b>.</div>
         <button class="btn primary" id="cam-start">Start camera</button>
       </div>
     </div>
+    <div class="small muted mono" id="ocr-read" aria-live="polite"></div>
     <form class="manual" id="manual-form">
-      <input id="manual-input" placeholder="Or type the code, e.g. sa2507089301…" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <input id="manual-input" placeholder="Or type the code under the barcode" autocomplete="off" autocapitalize="off" spellcheck="false">
       <button class="btn" type="submit">Find</button>
     </form>
     <div class="card" id="result">
@@ -335,6 +346,11 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
 
   function handleCode(code) {
     var matches = findMatches(code);
+    if (!matches.length) {
+      // Typed or read codes may be missing the letters or have one wrong digit.
+      var near = matchSku(code);
+      if (near) matches = findMatches(near.sku);
+    }
     var box = document.getElementById("result");
     if (!matches.length) {
       beep(false);
@@ -427,37 +443,136 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
 
   // ---------- camera ----------
 
-  var scanner = null, lastCode = "", lastTime = 0;
-  function startCamera() {
-    if (!window.Html5Qrcode) { toast("Scanner failed to load. Check your internet."); return; }
-    beep(true); // unlock audio on iOS from this tap
-    var F = window.Html5QrcodeSupportedFormats;
-    scanner = scanner || new Html5Qrcode("reader", {
-      formatsToSupport: [F.CODE_128, F.CODE_39, F.CODE_93, F.EAN_13, F.EAN_8, F.UPC_A, F.ITF, F.QR_CODE, F.DATA_MATRIX],
-      verbose: false
-    });
-    scanner.start(
-      { facingMode: "environment" },
-      { fps: 12, qrbox: function (w, h) { return { width: Math.floor(w * 0.9), height: Math.floor(Math.min(h * 0.45, 160)) }; } },
-      function (text) {
-        var now = Date.now();
-        if (text === lastCode && now - lastTime < 3000) return;
-        lastCode = text; lastTime = now;
-        handleCode(text);
-      },
-      function () { /* no code in this frame */ }
-    ).then(function () {
-      document.getElementById("cam-off").hidden = true;
-    }).catch(function (err) {
-      toast("Camera blocked. Allow camera access for this site in Safari settings.");
-      console.warn(err);
-    });
+  // The barcode on Shein labels holds a per-piece tracking number, not the SKU, so the
+  // camera reads the SKU text printed under it instead and matches it by its digits.
+  var GUIDE = { left: 0.06, top: 0.42, width: 0.88, height: 0.16 };
+  var video = document.getElementById("cam");
+  var stream = null, worker = null, running = false, frameNo = 0;
+  var lastSku = "", lastSeen = 0, pendingFuzzy = "", unknownKey = "", unknownHits = 0;
+
+  function toDigits(line) {
+    return line.replace(/[Oo]/g, "0").replace(/[Il|]/g, "1").replace(/[Zz]/g, "2").replace(/B/g, "8").replace(/\D/g, "");
   }
-  function stopCamera() {
-    if (scanner && scanner.isScanning) {
-      scanner.stop().catch(function () {});
-      document.getElementById("cam-off").hidden = false;
+  function skuDigits(sku) { return String(sku).replace(/^[a-z]+/i, ""); }
+
+  // Returns { sku, exact } when exactly one known SKU appears in the text, allowing one misread digit.
+  function matchSku(text) {
+    var skus = [];
+    state.customers.forEach(function (c) { c.items.forEach(function (it) { if (skus.indexOf(it.sku) < 0) skus.push(it.sku); }); });
+    var exact = [], fuzzy = [];
+    text.split(/\n/).forEach(function (line) {
+      var d = toDigits(line);
+      if (d.length < 12) return;
+      skus.forEach(function (sku) {
+        var sd = skuDigits(sku);
+        if (sd.length < 12) return;
+        if (d.indexOf(sd) >= 0) { if (exact.indexOf(sku) < 0) exact.push(sku); return; }
+        for (var o = 0; o + sd.length <= d.length; o++) {
+          var miss = 0;
+          for (var i = 0; i < sd.length && miss <= 1; i++) if (d[o + i] !== sd[i]) miss++;
+          if (miss <= 1) { if (fuzzy.indexOf(sku) < 0) fuzzy.push(sku); break; }
+        }
+      });
+    });
+    if (exact.length === 1) return { sku: exact[0], exact: true };
+    if (!exact.length && fuzzy.length === 1) return { sku: fuzzy[0], exact: false };
+    return null;
+  }
+
+  function setReading(msg) { document.getElementById("ocr-read").textContent = msg; }
+
+  async function startCamera() {
+    beep(true); // unlock audio on iOS from this tap
+    if (!window.Tesseract) { toast("The text reader didn't load. Check your internet and reload."); return; }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+    } catch (e) {
+      toast("Camera blocked. Allow camera access for this site in Safari settings.");
+      return;
     }
+    video.srcObject = stream;
+    await video.play().catch(function () {});
+    document.getElementById("cam-off").hidden = true;
+    document.getElementById("guide").hidden = false;
+    document.getElementById("guide-hint").hidden = false;
+    if (!worker) {
+      setReading("Loading the text reader (first time only)…");
+      worker = await Tesseract.createWorker("eng");
+      await worker.setParameters({ tessedit_char_whitelist: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" });
+    }
+    setReading("Looking for a code…");
+    running = true;
+    loop();
+  }
+
+  async function loop() {
+    var canvas = document.createElement("canvas");
+    while (running) {
+      try {
+        var text = await readFrame(canvas);
+        if (running && text != null) onText(text);
+      } catch (e) { /* skip this frame */ }
+      await new Promise(function (r) { setTimeout(r, 120); });
+    }
+  }
+
+  // Crop the guide box from the video as displayed (object-fit: cover), clean it up, and read it.
+  async function readFrame(canvas) {
+    var vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) return null;
+    var ew = video.clientWidth, eh = video.clientHeight;
+    var scale = Math.max(ew / vw, eh / vh);
+    var offX = (vw * scale - ew) / 2, offY = (vh * scale - eh) / 2;
+    var sx = (GUIDE.left * ew + offX) / scale, sy = (GUIDE.top * eh + offY) / scale;
+    var sw = GUIDE.width * ew / scale, sh = GUIDE.height * eh / scale;
+    var k = Math.min(3, 1400 / sw);
+    canvas.width = Math.round(sw * k); canvas.height = Math.round(sh * k);
+    var ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+    var img = ctx.getImageData(0, 0, canvas.width, canvas.height), px = img.data, lo = 255, hi = 0, i, g;
+    for (i = 0; i < px.length; i += 4) { g = (px[i] * 3 + px[i + 1] * 6 + px[i + 2]) / 10; px[i] = g; if (g < lo) lo = g; if (g > hi) hi = g; }
+    var span = Math.max(1, hi - lo);
+    for (i = 0; i < px.length; i += 4) { g = (px[i] - lo) * 255 / span; px[i] = px[i + 1] = px[i + 2] = g; }
+    ctx.putImageData(img, 0, 0);
+    // Alternate single-line and block layout; each catches labels the other misses.
+    frameNo++;
+    await worker.setParameters({ tessedit_pageseg_mode: frameNo % 2 ? "7" : "6" });
+    var res = await worker.recognize(canvas);
+    return res.data.text || "";
+  }
+
+  function onText(text) {
+    var now = Date.now();
+    var line = text.split(/\n/).map(function (l) { return l.trim(); }).filter(function (l) { return /\d{8}/.test(l); })[0];
+    var m = matchSku(text);
+    if (!m) {
+      setReading(line ? "Reading: " + line.slice(0, 40) : "Looking for a code…");
+      // A long code that matches nothing and reads the same 3 frames in a row is a real
+      // label that isn't in any cart; report it once.
+      var key = line ? toDigits(line) : "";
+      if (key.length >= 15 && key === unknownKey) unknownHits++; else { unknownKey = key; unknownHits = 1; }
+      if (unknownHits === 3 && key !== lastSku) { lastSku = key; lastSeen = now; handleCode(line.replace(/\s+/g, "")); }
+      return;
+    }
+    unknownKey = ""; unknownHits = 0;
+    // A one-digit-off read must repeat on the next frame before it counts.
+    if (!m.exact && pendingFuzzy !== "~" + m.sku) { pendingFuzzy = "~" + m.sku; setReading("Checking: " + m.sku); return; }
+    pendingFuzzy = "";
+    setReading("Read: " + m.sku);
+    // The same label stays in view for several frames; count it again only after it left the view.
+    if (m.sku === lastSku && now - lastSeen < 2500) { lastSeen = now; return; }
+    lastSku = m.sku; lastSeen = now;
+    handleCode(m.sku);
+  }
+
+  function stopCamera() {
+    running = false;
+    if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+    video.srcObject = null;
+    document.getElementById("cam-off").hidden = false;
+    document.getElementById("guide").hidden = true;
+    document.getElementById("guide-hint").hidden = true;
+    setReading("");
   }
   document.getElementById("cam-start").addEventListener("click", startCamera);
   document.addEventListener("visibilitychange", function () { if (document.hidden) stopCamera(); });
@@ -941,7 +1056,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
     var demo = [
       ["Demo – Sara", "sa25070893018031222 0-1M\nsa25080198887186332 1-3M\nsa260718211849698155579 12-18M\nsi2406117222258541 XL"],
       ["Demo – Noor", "sa25062088980812096 1-3M\nsa260718211849698155579 1-3M\nsi2407305448946722 M"],
-      ["Demo – Huda", "sk260611161636652979632 0-6M\nsk2408261654265556 0-6M"]
+      ["Demo – Huda", "sk260611161636652979632 0-6M\nsk2408261654265556 0-6M\nsk25061715165400395 12Y\nsh260317102328541477414 L"]
     ];
     demo.forEach(function (d) {
       state.customers.push({
