@@ -171,7 +171,8 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
   <!-- CUSTOMERS -->
   <section class="view" id="view-customers" hidden>
     <div class="row">
-      <button class="btn primary" id="add-manual">Add customer by pasting</button>
+      <button class="btn primary" id="send-scanner">Send to scanner</button>
+      <button class="btn" id="add-manual">Add customer by pasting</button>
       <button class="btn danger" id="reset-picks">Reset scans</button>
     </div>
     <div id="cust-list" class="view"></div>
@@ -190,7 +191,16 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
       </ol>
     </div>
     <div class="card">
-      <h3 style="margin-top:0">One-time: install the "Get SKUs" button</h3>
+      <h3 style="margin-top:0">On a PC: add carts, then send them to the scanner</h3>
+      <ol class="steps">
+        <li>Show the bookmarks bar (Ctrl+Shift+B), then drag this button onto it:
+          <a id="bm-link" class="btn primary" style="display:inline-block;text-decoration:none;margin-left:4px" href="#">Get SKUs</a></li>
+        <li>Open a customer's Shein cart link. When the products show, click <b>Get SKUs</b> in the bookmarks bar and type the customer's name. Repeat for each customer.</li>
+        <li>Go to <b>Customers</b>, click <b>Send to scanner</b>, and send the link to the person who scans the box.</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h3 style="margin-top:0">One-time on iPhone: install the "Get SKUs" button</h3>
       <ol class="steps">
         <li>Tap <b>Copy button code</b> below.</li>
         <li>In Safari tap the Share icon, then <b>Add Bookmark</b>. Name it <b>Get SKUs</b> and save.</li>
@@ -563,6 +573,106 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
   }
   document.getElementById("add-manual").addEventListener("click", function () { addCustomerSheet([], false); });
 
+  // ---------- share all customers as a link ----------
+
+  var IMG_HOST = "//img.ltwebstatic.com/";
+  function shortImg(u) { u = String(u || "").replace(/^https?:/, ""); return u.indexOf(IMG_HOST) === 0 ? "~" + u.slice(IMG_HOST.length) : u; }
+  function longImg(u) { return u && u.charAt(0) === "~" ? IMG_HOST + u.slice(1) : u; }
+
+  function toB64url(bytes) {
+    var s = "";
+    for (var i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function fromB64url(str) {
+    var s = atob(str.replace(/-/g, "+").replace(/_/g, "/"));
+    var out = new Uint8Array(s.length);
+    for (var i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+    return out;
+  }
+  async function pipe(bytes, stream) {
+    var res = new Response(new Blob([bytes]).stream().pipeThrough(stream));
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
+  // "z" + deflated JSON where the browser can compress, otherwise "j" + plain JSON.
+  async function encodeShare() {
+    var data = state.customers.map(function (c) {
+      return [c.name, COLORS.indexOf(c.color), c.items.map(function (it) {
+        return [it.sku, it.size || "", String(it.name || "").slice(0, 60), shortImg(it.img), it.qty];
+      })];
+    });
+    var json = JSON.stringify(data);
+    if (window.CompressionStream) {
+      try { return "z" + toB64url(await pipe(new TextEncoder().encode(json), new CompressionStream("deflate-raw"))); } catch (e) { /* fall through */ }
+    }
+    return "j" + encodeURIComponent(json);
+  }
+  async function decodeShare(payload) {
+    var json = payload.charAt(0) === "z"
+      ? new TextDecoder().decode(await pipe(fromB64url(payload.slice(1)), new DecompressionStream("deflate-raw")))
+      : decodeURIComponent(payload.slice(1));
+    return JSON.parse(json).map(function (c, i) {
+      return {
+        id: "c" + Date.now().toString(36) + i,
+        name: c[0], color: COLORS[c[1]] || COLORS[i % COLORS.length],
+        items: c[2].map(function (r) { return { sku: r[0], size: r[1], name: r[2], img: longImg(r[3]), qty: Number(r[4]) || 1, picked: 0 }; })
+      };
+    });
+  }
+
+  document.getElementById("send-scanner").addEventListener("click", async function () {
+    if (!state.customers.length) { toast("Add at least one customer first"); return; }
+    var link = location.origin + location.pathname + "#load=" + (await encodeShare());
+    var items = state.customers.reduce(function (n, c) { return n + c.items.length; }, 0);
+    var s = openSheet(
+      '<h2>Send to scanner</h2>' +
+      '<div class="small muted">' + state.customers.length + ' customers · ' + items + ' items. The person who opens this link gets all of them on their phone and can start scanning.</div>' +
+      '<textarea id="share-link" class="mono" rows="4" readonly style="width:100%;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:8px"></textarea>' +
+      '<div class="row"><button class="btn primary" id="share-copy">Copy link</button>' +
+      (navigator.share ? '<button class="btn" id="share-native">Share…</button>' : '') +
+      '<button class="btn" id="share-close">Close</button></div>'
+    );
+    var ta = s.querySelector("#share-link");
+    ta.value = link;
+    s.querySelector("#share-copy").addEventListener("click", function () {
+      var ok = function () { toast("Link copied. Send it on WhatsApp or by email."); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(link).then(ok, function () { ta.select(); document.execCommand("copy"); ok(); });
+      } else { ta.select(); document.execCommand("copy"); ok(); }
+    });
+    var nat = s.querySelector("#share-native");
+    if (nat) nat.addEventListener("click", function () { navigator.share({ title: "Box Sorter", url: link }).catch(function () {}); });
+    s.querySelector("#share-close").addEventListener("click", closeSheet);
+  });
+
+  async function readLoad() {
+    var h = location.hash;
+    if (h.indexOf("#load=") !== 0) return;
+    history.replaceState(null, "", location.pathname + location.search);
+    var incoming;
+    try { incoming = await decodeShare(h.slice(6)); } catch (e) {
+      toast("This link is incomplete. Ask for the link to be sent again.");
+      return;
+    }
+    var items = incoming.reduce(function (n, c) { return n + c.items.length; }, 0);
+    var s = openSheet(
+      '<h2>Load ' + incoming.length + ' customers (' + items + ' items)?</h2>' +
+      '<div class="small">' + incoming.map(function (c) {
+        return '<span class="pill" style="background:var(' + c.color + ')">' + esc(c.name) + '</span> ';
+      }).join("") + '</div>' +
+      (state.customers.length ? '<div class="small muted">This replaces the ' + state.customers.length + ' customers already on this phone.</div>' : '') +
+      '<div class="row"><button class="btn primary" id="ld-yes">Load and start scanning</button><button class="btn" id="ld-no">Cancel</button></div>'
+    );
+    s.querySelector("#ld-no").addEventListener("click", closeSheet);
+    s.querySelector("#ld-yes").addEventListener("click", function () {
+      state.customers = incoming; lastAction = null; save(); closeSheet(); renderSummary();
+      showView("scan");
+      toast("Loaded. Tap Start camera to scan.");
+    });
+  }
+  window.addEventListener("hashchange", readLoad);
+
   // ---------- import from the Safari button ----------
 
   function readImport() {
@@ -620,6 +730,9 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
     return "javascript:(" + src + ")(" + JSON.stringify(app) + ");void 0";
   }
   document.getElementById("bm-code").value = bookmarkletCode();
+  var bmLink = document.getElementById("bm-link");
+  bmLink.href = bookmarkletCode();
+  bmLink.addEventListener("click", function (e) { e.preventDefault(); toast("Drag this button onto your bookmarks bar"); });
   document.getElementById("copy-bm").addEventListener("click", function () {
     var code = bookmarkletCode();
     var ta = document.getElementById("bm-code");
@@ -650,6 +763,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
 
   renderSummary();
   readImport();
+  readLoad();
 })();
 </script>
 </body>
