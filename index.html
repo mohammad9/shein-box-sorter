@@ -144,7 +144,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
 <header>
   <div>
     <h1>Box Sorter</h1>
-    <div class="sub" id="summary">No customers yet</div>
+    <div class="sub"><span id="summary">No customers yet</span> <span id="live"></span></div>
   </div>
   <button class="btn" id="undo-btn" hidden>Undo</button>
 </header>
@@ -172,7 +172,6 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
   <section class="view" id="view-customers" hidden>
     <div class="row">
       <button class="btn primary" id="send-scanner">Send to scanner</button>
-      <button class="btn primary" id="send-progress">Send progress</button>
       <button class="btn" id="add-manual">Add customer by pasting</button>
       <button class="btn danger" id="reset-picks">Reset scans</button>
     </div>
@@ -197,7 +196,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
         <li>Show the bookmarks bar (Ctrl+Shift+B), then drag this button onto it:
           <a id="bm-link" class="btn primary" style="display:inline-block;text-decoration:none;margin-left:4px" href="#">Get SKUs</a></li>
         <li>Open a customer's Shein cart link. When the products show, click <b>Get SKUs</b> in the bookmarks bar and type the customer's name. Repeat for each customer.</li>
-        <li>Go to <b>Customers</b>, click <b>Send to scanner</b>, and send the link to the person who scans the box.</li>
+        <li>Go to <b>Customers</b>, click <b>Send to scanner</b>, and send the short link to the person who scans the box. Their scans then show up live on your PC.</li>
       </ol>
     </div>
     <div class="card">
@@ -224,6 +223,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
       </ul>
       <div class="row" style="margin-top:12px">
         <button class="btn" id="load-demo">Load demo customers</button>
+        <button class="btn" id="leave-box" hidden>Stop live sharing</button>
         <button class="btn danger" id="clear-all">Delete all customers</button>
       </div>
     </div>
@@ -322,11 +322,11 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
   function findMatches(code) {
     var c = norm(code), out = [];
     if (c.length < 6) return out;
-    state.customers.forEach(function (cust) {
+    state.customers.forEach(function (cust, ci) {
       cust.items.forEach(function (it, idx) {
         var s = norm(it.sku);
         if (s && (s === c || (c.length >= 10 && (c.indexOf(s) >= 0 || s.indexOf(c) >= 0)))) {
-          out.push({ cust: cust, item: it, idx: idx });
+          out.push({ cust: cust, item: it, idx: idx, ci: ci });
         }
       });
     });
@@ -381,9 +381,14 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
   }
 
   function assign(m, silent) {
+    // A live update may have replaced the objects since the scan; resolve them again by position.
+    var cust = state.customers[m.ci], item = cust && cust.items[m.idx];
+    if (!item || item.sku !== m.item.sku) { toast("The list changed. Scan the item again."); return; }
+    m = { cust: cust, item: item, idx: m.idx, ci: m.ci };
     m.item.picked += 1;
     lastAction = { custId: m.cust.id, idx: m.idx };
     save();
+    pushPicked(m.ci, m.idx, m.item.picked);
     if (!silent) beep(true);
     var left = 0, total = 0;
     m.cust.items.forEach(function (it) { total += it.qty; left += Math.max(0, it.qty - it.picked); });
@@ -404,6 +409,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
     if (cust && cust.items[lastAction.idx] && cust.items[lastAction.idx].picked > 0) {
       cust.items[lastAction.idx].picked -= 1;
       save();
+      pushPicked(state.customers.indexOf(cust), lastAction.idx, cust.items[lastAction.idx].picked);
       toast("Last scan undone for " + cust.name);
     }
     lastAction = null;
@@ -489,7 +495,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
     list.querySelectorAll("[data-del]").forEach(function (b) {
       b.addEventListener("click", function () { confirmSheet("Remove this customer and their items?", "Remove", function () {
         state.customers = state.customers.filter(function (c) { return c.id !== b.dataset.del; });
-        save(); renderCustomers(); renderSummary();
+        save(); pushBox(); renderCustomers(); renderSummary();
       }); });
     });
   }
@@ -497,14 +503,147 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
   document.getElementById("reset-picks").addEventListener("click", function () {
     confirmSheet("Set every customer back to 0 scanned items?", "Reset", function () {
       state.customers.forEach(function (c) { c.items.forEach(function (it) { it.picked = 0; }); });
-      lastAction = null; save(); renderCustomers(); renderSummary();
+      lastAction = null; save(); pushBox(); renderCustomers(); renderSummary();
     });
   });
   document.getElementById("clear-all").addEventListener("click", function () {
-    confirmSheet("Delete all customers from this phone?", "Delete all", function () {
+    confirmSheet("Delete all customers from this device?", "Delete all", function () {
+      leaveBox();
       state.customers = []; lastAction = null; save(); renderSummary(); toast("All customers deleted");
     });
   });
+  document.getElementById("leave-box").addEventListener("click", function () {
+    leaveBox(); toast("Live sharing stopped on this device. Your customers are kept.");
+  });
+
+  // ---------- live sync (Firebase Realtime Database over REST) ----------
+
+  var DB = "https://box-sorter-default-rtdb.europe-west1.firebasedatabase.app";
+  var es = null, refetchTimer = null;
+
+  function boxUrl(path, id) { return DB + "/boxes/" + (id || state.boxId) + (path || "") + ".json"; }
+  function newBoxId() {
+    var a = "abcdefghjkmnpqrstuvwxyz23456789", s = "", r = crypto.getRandomValues(new Uint8Array(10));
+    for (var i = 0; i < 10; i++) s += a[r[i] % a.length];
+    return s;
+  }
+  function setLive(on) {
+    var el = document.getElementById("live");
+    if (!state.boxId) { el.textContent = ""; }
+    else { el.innerHTML = on ? '· <b style="color:var(--ok)">● Live</b>' : '· <b style="color:var(--warn)">● Reconnecting…</b>'; }
+    document.getElementById("leave-box").hidden = !state.boxId;
+  }
+  function remotePayload() {
+    return {
+      updated: { ".sv": "timestamp" },
+      customers: state.customers.map(function (c) {
+        return { name: c.name, color: c.color, items: c.items.map(function (it) {
+          return { sku: it.sku, size: it.size || "", name: it.name || "", img: it.img || "", qty: it.qty, picked: it.picked };
+        }) };
+      })
+    };
+  }
+  function pushBox() {
+    if (!state.boxId) return Promise.resolve(true);
+    return fetch(boxUrl(), { method: "PUT", body: JSON.stringify(remotePayload()) })
+      .then(function (r) { return r.ok; }).catch(function () { return false; });
+  }
+  function pushPicked(ci, ii, n) {
+    if (!state.boxId || ci < 0) return;
+    fetch(boxUrl("/customers/" + ci + "/items/" + ii + "/picked"), { method: "PUT", body: String(n) })
+      .catch(function () { toast("Not saved online. Check the internet connection."); });
+  }
+  function fromRemote(data) {
+    return (data && data.customers || []).map(function (c, i) {
+      return {
+        id: "r" + i, name: c.name, color: COLORS.indexOf(c.color) >= 0 ? c.color : COLORS[i % COLORS.length],
+        items: (c.items || []).map(function (it) {
+          return { sku: it.sku, size: it.size || "", name: it.name || "", img: it.img || "", qty: Number(it.qty) || 1, picked: Number(it.picked) || 0 };
+        })
+      };
+    });
+  }
+  function refetch() {
+    clearTimeout(refetchTimer);
+    refetchTimer = setTimeout(function () {
+      if (!state.boxId) return;
+      fetch(boxUrl()).then(function (r) { return r.json(); }).then(function (data) {
+        if (!data) return;
+        state.customers = fromRemote(data);
+        save(); renderSummary();
+        if (!document.getElementById("view-customers").hidden) renderCustomers();
+      }).catch(function () {});
+    }, 250);
+  }
+  function listen() {
+    if (es) { es.close(); es = null; }
+    if (!state.boxId || !window.EventSource) { setLive(false); return; }
+    es = new EventSource(boxUrl());
+    es.onopen = function () { setLive(true); };
+    es.onerror = function () { setLive(false); };
+    es.addEventListener("put", function () { setLive(true); refetch(); });
+    es.addEventListener("patch", function () { setLive(true); refetch(); });
+  }
+  function leaveBox() {
+    if (es) { es.close(); es = null; }
+    delete state.boxId; save(); setLive(false);
+  }
+
+  async function sendToScanner() {
+    if (!state.customers.length) { toast("Add at least one customer first"); return; }
+    if (!state.boxId) { state.boxId = newBoxId(); save(); }
+    var ok = await pushBox();
+    if (!ok) {
+      leaveBox();
+      toast("Couldn't reach the online database. Sending a long link instead.");
+      shareSheet(false);
+      return;
+    }
+    listen();
+    var link = location.origin + location.pathname + "#box=" + state.boxId;
+    var s = openSheet(
+      '<h2>Send to scanner</h2>' +
+      '<div class="small muted">Send this link to the person who scans the box. Their scans show up here live, and customers you add or change here show up on their phone.</div>' +
+      '<div class="mono" style="font-size:15px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg)">' + esc(link) + '</div>' +
+      '<div class="row"><button class="btn primary" id="share-copy">Copy link</button>' +
+      (navigator.share ? '<button class="btn" id="share-native">Share…</button>' : '') +
+      '<button class="btn" id="share-close">Close</button></div>'
+    );
+    s.querySelector("#share-copy").addEventListener("click", function () {
+      var ok2 = function () { toast("Link copied. Send it on WhatsApp or by email."); };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(ok2, function () { toast("Copy failed. Select the link and copy it."); });
+    });
+    var nat = s.querySelector("#share-native");
+    if (nat) nat.addEventListener("click", function () { navigator.share({ title: "Box Sorter", url: link }).catch(function () {}); });
+    s.querySelector("#share-close").addEventListener("click", closeSheet);
+  }
+
+  async function readBox() {
+    var h = location.hash;
+    if (h.indexOf("#box=") !== 0) return;
+    var id = h.slice(5).replace(/[^a-z0-9]/g, "");
+    history.replaceState(null, "", location.pathname + location.search);
+    if (id === state.boxId) { listen(); refetch(); showView("scan"); return; }
+    var data;
+    try { data = await (await fetch(boxUrl("", id))).json(); } catch (e) { toast("No internet connection. Open the link again when you're online."); return; }
+    if (!data || !data.customers) { toast("This box link doesn't work anymore. Ask for a new link."); return; }
+    var incoming = fromRemote(data);
+    var join = function () {
+      state.boxId = id; state.customers = incoming; lastAction = null; save(); closeSheet();
+      renderSummary(); listen(); showView("scan");
+      toast("Joined. Tap Start camera to scan.");
+    };
+    if (!state.customers.length) { join(); return; }
+    var s = openSheet(
+      '<h2>Open this box with ' + incoming.length + ' customers?</h2>' +
+      '<div class="small">' + incoming.map(function (c) { return '<span class="pill" style="background:var(' + c.color + ')">' + esc(c.name) + '</span> '; }).join("") + '</div>' +
+      '<div class="small muted">This replaces the ' + state.customers.length + ' customers already on this device.</div>' +
+      '<div class="row"><button class="btn primary" id="bx-yes">Open box</button><button class="btn" id="bx-no">Cancel</button></div>'
+    );
+    s.querySelector("#bx-yes").addEventListener("click", join);
+    s.querySelector("#bx-no").addEventListener("click", closeSheet);
+  }
+  window.addEventListener("hashchange", readBox);
 
   // ---------- sheets ----------
 
@@ -566,7 +705,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
         name: name, color: chosen,
         items: list.map(function (it) { return { sku: it.sku, size: it.size, name: it.name, img: it.img, qty: it.qty || 1, picked: 0 }; })
       });
-      save(); closeSheet(); renderSummary();
+      save(); pushBox(); closeSheet(); renderSummary();
       toast(name + " added with " + list.length + " items");
       showView("customers");
     });
@@ -630,8 +769,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
     return { total: total, picked: picked };
   }
 
-  document.getElementById("send-scanner").addEventListener("click", function () { shareSheet(false); });
-  document.getElementById("send-progress").addEventListener("click", function () { shareSheet(true); });
+  document.getElementById("send-scanner").addEventListener("click", sendToScanner);
 
   async function shareSheet(progress) {
     if (!state.customers.length) { toast("Add at least one customer first"); return; }
@@ -802,14 +940,16 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
         items: d[1].split("\n").map(function (l) { var p = l.split(" "); return { sku: p[0], size: p[1], name: "", img: "", qty: 1, picked: 0 }; })
       });
     });
-    save(); renderSummary(); toast("Demo customers added"); showView("customers");
+    save(); pushBox(); renderSummary(); toast("Demo customers added"); showView("customers");
   });
 
   // ---------- boot ----------
 
   renderSummary();
+  if (state.boxId) { listen(); refetch(); }
   readImport();
   readLoad();
+  readBox();
 })();
 </script>
 </body>
