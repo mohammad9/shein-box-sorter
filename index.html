@@ -183,6 +183,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
   <section class="view" id="view-customers" hidden>
     <div class="row">
       <button class="btn primary" id="send-scanner">Send to scanner</button>
+      <button class="btn" id="add-carts">Add carts</button>
       <button class="btn" id="add-manual">Add customer by pasting</button>
       <button class="btn danger" id="reset-picks">Reset scans</button>
     </div>
@@ -191,8 +192,23 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
 
   <!-- SETUP -->
   <section class="view" id="view-setup" hidden>
+    <div class="card" id="carts-card">
+      <h3 style="margin-top:0">Add carts</h3>
+      <ol class="steps">
+        <li>Paste all the customers' cart links below. You can paste a whole chat message, and the app finds the links.</li>
+        <li>Check the names and click <b>Start</b>.</li>
+        <li>Each cart opens in turn. When its products show, click <b>Get SKUs</b>. The app adds that customer and opens the next cart by itself.</li>
+      </ol>
+      <div class="field" style="margin-top:12px">
+        <textarea id="q-paste" rows="4" class="mono" placeholder="Sara https://onelink.shein.com/...&#10;Noor https://onelink.shein.com/..."></textarea>
+      </div>
+      <div id="q-list" class="field" style="margin-top:8px"></div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn primary" id="q-start" disabled>Start</button>
+      </div>
+    </div>
     <div class="card">
-      <h3 style="margin-top:0">Add a customer's cart</h3>
+      <h3 style="margin-top:0">Add one cart on iPhone</h3>
       <ol class="steps">
         <li>Copy the customer's Shein cart link.</li>
         <li>Open <b>Safari</b>, paste the link into the address bar and go. If Safari asks to open the SHEIN app, tap <b>Cancel</b>.</li>
@@ -202,12 +218,11 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
       </ol>
     </div>
     <div class="card">
-      <h3 style="margin-top:0">On a PC: add carts, then send them to the scanner</h3>
+      <h3 style="margin-top:0">One-time on PC: install the "Get SKUs" button</h3>
       <ol class="steps">
         <li>Show the bookmarks bar (Ctrl+Shift+B), then drag this button onto it:
           <a id="bm-link" class="btn primary" style="display:inline-block;text-decoration:none;margin-left:4px" href="#">Get SKUs</a></li>
-        <li>Open a customer's Shein cart link. When the products show, click <b>Get SKUs</b> in the bookmarks bar and type the customer's name. Repeat for each customer.</li>
-        <li>Go to <b>Customers</b>, click <b>Send to scanner</b>, and send the short link to the person who scans the box. Their scans then show up live on your PC.</li>
+        <li>After adding the carts, go to <b>Customers</b>, click <b>Send to scanner</b>, and send the short link to the person who scans the box. Their scans then show up live on your PC.</li>
       </ol>
     </div>
     <div class="card">
@@ -836,6 +851,10 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
     setTimeout(function () { var n = s.querySelector("#ac-name"); if (n) n.focus(); }, 50);
   }
   document.getElementById("add-manual").addEventListener("click", function () { addCustomerSheet([], false); });
+  document.getElementById("add-carts").addEventListener("click", function () {
+    showView("setup");
+    document.getElementById("q-paste").focus();
+  });
 
   // ---------- share all customers as a link ----------
 
@@ -993,21 +1012,132 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
       }).filter(function (it) { return it && it.sku; });
       history.replaceState(null, "", location.pathname + location.search);
       if (!items.length) { toast("No items found in that cart"); return; }
-      addCustomerSheet(items, true);
+      var q = loadQueue();
+      if (q && q.pos < q.list.length) queueImport(q, items);
+      else addCustomerSheet(items, true);
     } catch (e) {
       toast("Couldn't read the cart data. Try the Get SKUs button again.");
     }
   }
   window.addEventListener("hashchange", readImport);
 
+  // ---------- add several carts in a row ----------
+
+  var QUEUE_KEY = "boxSorter.queue";
+  function loadQueue() {
+    try {
+      var q = JSON.parse(localStorage.getItem(QUEUE_KEY));
+      // A queue left from an earlier day shouldn't rename a cart added by hand later.
+      return q && Array.isArray(q.list) && Date.now() - q.started < 6 * 3600e3 ? q : null;
+    } catch (e) { return null; }
+  }
+  function saveQueue(q) {
+    try { if (q) localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); else localStorage.removeItem(QUEUE_KEY); } catch (e) { /* storage unavailable */ }
+  }
+
+  // Finds the Shein links in pasted text, with the name written before each link or on the line above it.
+  var SHARE_WORDS = /shein|cart|items|recommend|سلة|عربة|منتجات/i;
+  function cleanName(s) {
+    s = s.replace(/^[\s\d.)•*-]+/, "").replace(/[\s:|,.–—-]+$/, "");
+    return s.length > 25 || SHARE_WORDS.test(s) ? "" : s;
+  }
+  function parseCarts(text) {
+    var out = [], seen = {}, above = "";
+    text.split(/\r?\n/).forEach(function (line) {
+      var urls = line.match(/https?:\/\/\S*shein\.com\S*/gi);
+      if (!urls) { if (line.trim()) above = line.trim(); return; }
+      var before = line.slice(0, line.indexOf(urls[0])).trim();
+      urls.forEach(function (u, i) {
+        u = u.replace(/[)\].,]+$/, "");
+        if (seen[u]) return;
+        seen[u] = 1;
+        out.push({ url: u, name: i === 0 ? cleanName(before) || cleanName(above) : "" });
+      });
+      above = "";
+    });
+    return out;
+  }
+
+  var qPaste = document.getElementById("q-paste"), qList = document.getElementById("q-list"), qStart = document.getElementById("q-start");
+  var qFound = [];
+  function renderQueueList() {
+    qFound = parseCarts(qPaste.value);
+    qStart.disabled = !qFound.length;
+    if (qFound.length) {
+      qList.innerHTML = '<label>' + qFound.length + (qFound.length > 1 ? ' carts' : ' cart') + ' found. Type a name for each:</label>' +
+        qFound.map(function (c, i) {
+          return '<input data-i="' + i + '" value="' + esc(c.name) + '" placeholder="Customer ' + (state.customers.length + i + 1) + '" autocomplete="off">';
+        }).join("");
+      return;
+    }
+    var q = loadQueue();
+    if (q && q.pos < q.list.length) {
+      qList.innerHTML = '<span class="muted">Paused: ' + q.pos + ' of ' + q.list.length + ' carts added. Next is ' + esc(q.list[q.pos].name) + '.</span>' +
+        '<div class="row"><button class="btn primary" id="q-resume">Open next cart</button><button class="btn" id="q-cancel">Cancel the rest</button></div>';
+      qList.querySelector("#q-resume").addEventListener("click", function () { location.href = q.list[q.pos].url; });
+      qList.querySelector("#q-cancel").addEventListener("click", function () { saveQueue(null); renderQueueList(); });
+      return;
+    }
+    qList.innerHTML = qPaste.value.trim() ? '<span class="muted">No Shein links found in that text.</span>' : "";
+  }
+  qPaste.addEventListener("input", renderQueueList);
+  qList.addEventListener("input", function (e) {
+    var i = e.target.dataset && e.target.dataset.i;
+    if (i != null && qFound[i]) qFound[i].name = e.target.value;
+  });
+  qStart.addEventListener("click", function () {
+    if (!qFound.length) return;
+    var base = state.customers.length;
+    var q = { started: Date.now(), pos: 0, list: qFound.map(function (c, i) {
+      return { url: c.url, name: c.name.trim() || "Customer " + (base + i + 1) };
+    }) };
+    saveQueue(q);
+    location.href = q.list[0].url;
+  });
+
+  // Called when "Get SKUs" brings back a cart while a list of carts is being added.
+  function queueImport(q, items) {
+    var entry = q.list[q.pos];
+    closeSheet();
+    state.customers.push({
+      id: "c" + Date.now().toString(36), name: entry.name, color: nextColor(),
+      items: items.map(function (it) { return { sku: it.sku, size: it.size, name: it.name, img: it.img, qty: it.qty || 1, picked: 0 }; })
+    });
+    save(); renderSummary();
+    var pushed = pushBox();
+    q.pos++;
+    var next = q.list[q.pos];
+    showView("customers");
+    if (!next) {
+      saveQueue(null);
+      toast(entry.name + " added. All " + q.list.length + " carts are in.");
+      return;
+    }
+    saveQueue(q);
+    var s = openSheet('<h2>' + esc(entry.name) + ' added: ' + items.length + (items.length === 1 ? ' item' : ' items') + '</h2>' +
+      '<p class="muted">Opening ' + esc(next.name) + '’s cart (' + (q.pos + 1) + ' of ' + q.list.length + ')…</p>' +
+      '<div class="row"><button class="btn primary" id="qn-go">Open now</button><button class="btn" id="qn-stop">Pause</button></div>');
+    var timer = setTimeout(go, 2000);
+    function go() {
+      clearTimeout(timer);
+      pushed.then(function () { location.href = next.url; });
+    }
+    s.querySelector("#qn-go").addEventListener("click", go);
+    s.querySelector("#qn-stop").addEventListener("click", function () {
+      clearTimeout(timer); closeSheet(); renderQueueList();
+      toast("Paused. Continue from Setup.");
+    });
+  }
+  renderQueueList();
+
   // ---------- bookmarklet ----------
 
   // Runs on the Shein cart share page. Finds the cart component Vue renders and sends
   // each product's SKU (goods_sn), size, name and image back to this app.
+  // Waits up to 15 s for the products to load, so it can be clicked as soon as the page opens.
   function grabber(APP) {
-    var root = document.getElementById("app");
-    var seen = new Set();
-    var found = null;
+    var tries = 0, note = null;
+    var seen, found;
     function walk(v, d) {
       if (!v || found || d > 400) return;
       var c = v.component;
@@ -1021,15 +1151,35 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
       if (v.dynamicChildren) v.dynamicChildren.forEach(function (x) { walk(x, d + 1); });
       if (v.suspense) walk(v.suspense.activeBranch, d + 1);
     }
-    walk(root && root._vnode, 0);
-    if (!found) { alert("No cart found on this page. Open the customer's Shein cart link first and wait until the products show."); return; }
-    var list = [].concat(found.normalProducts || [], found.outStock || [], found.unavailable || []);
-    var rows = list.map(function (p) {
-      var size = String(p.goodsAttr || "").split("/").pop().trim();
-      var qty = p.quantity || (p.product && p.product.quantity) || 1;
-      return [p.goods_sn, size, String(p.goods_name || "").slice(0, 70), p.goods_img || "", qty];
-    }).filter(function (r) { return r[0]; });
-    location.href = APP + String.fromCharCode(35) + "import=" + encodeURIComponent(JSON.stringify(rows));
+    function run() {
+      var root = document.getElementById("app");
+      seen = new Set();
+      found = null;
+      walk(root && root._vnode, 0);
+      if (found) { send(); return; }
+      if (++tries > 30) {
+        if (note) note.remove();
+        alert("No cart found on this page. Open the customer's Shein cart link first and wait until the products show.");
+        return;
+      }
+      if (!note) {
+        note = document.createElement("div");
+        note.textContent = "Reading the cart...";
+        note.style.cssText = "position:fixed;top:12px;left:0;right:0;margin:auto;width:max-content;z-index:2147483647;background:rgb(20,20,20);color:white;padding:10px 18px;border-radius:20px;font:15px sans-serif";
+        document.body.appendChild(note);
+      }
+      setTimeout(run, 500);
+    }
+    function send() {
+      var list = [].concat(found.normalProducts || [], found.outStock || [], found.unavailable || []);
+      var rows = list.map(function (p) {
+        var size = String(p.goodsAttr || "").split("/").pop().trim();
+        var qty = p.quantity || (p.product && p.product.quantity) || 1;
+        return [p.goods_sn, size, String(p.goods_name || "").slice(0, 70), p.goods_img || "", qty];
+      }).filter(function (r) { return r[0]; });
+      location.href = APP + String.fromCharCode(35) + "import=" + encodeURIComponent(JSON.stringify(rows));
+    }
+    run();
   }
 
   function bookmarkletCode() {
