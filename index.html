@@ -197,7 +197,8 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
       <ol class="steps">
         <li>Paste all the customers' cart links below. You can paste a whole chat message, and the app finds the links.</li>
         <li>Check the names and click <b>Start</b>.</li>
-        <li>Each cart opens in turn. When its products show, click <b>Get SKUs</b>. The app adds that customer and opens the next cart by itself.</li>
+        <li>A blank Shein page opens first. Click <b>Get SKUs</b> on it, and the app finds every cart.</li>
+        <li>Each cart then opens in turn. When its products show, click <b>Get SKUs</b>. The app adds that customer and opens the next cart by itself.</li>
       </ol>
       <div class="field" style="margin-top:12px">
         <textarea id="q-paste" rows="4" class="mono" placeholder="Sara https://onelink.shein.com/...&#10;Noor https://onelink.shein.com/..."></textarea>
@@ -1074,7 +1075,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
     if (q && q.pos < q.list.length) {
       qList.innerHTML = '<span class="muted">Paused: ' + q.pos + ' of ' + q.list.length + ' carts added. Next is ' + esc(q.list[q.pos].name) + '.</span>' +
         '<div class="row"><button class="btn primary" id="q-resume">Open next cart</button><button class="btn" id="q-cancel">Cancel the rest</button></div>';
-      qList.querySelector("#q-resume").addEventListener("click", function () { location.href = q.list[q.pos].url; });
+      qList.querySelector("#q-resume").addEventListener("click", function () { openQueue(q); });
       qList.querySelector("#q-cancel").addEventListener("click", function () { saveQueue(null); renderQueueList(); });
       return;
     }
@@ -1089,11 +1090,63 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
     if (!qFound.length) return;
     var base = state.customers.length;
     var q = { started: Date.now(), pos: 0, list: qFound.map(function (c, i) {
-      return { url: c.url, name: c.name.trim() || "Customer " + (base + i + 1) };
+      return { url: c.url, shc: shcOf(c.url), name: c.name.trim() || "Customer " + (base + i + 1) };
     }) };
     saveQueue(q);
-    location.href = q.list[0].url;
+    openQueue(q);
   });
+
+  // Shein sends computers to its home page from cart links, so the cart's number (group_id) is
+  // looked up first and the mobile cart page is opened directly. The lookup only works from a
+  // page on Shein's share server, so "Get SKUs" does it there (see grabber) and sends the numbers back.
+  var LOOKUP_PAGE = "https://api-shein.shein.com/h5/";
+  function shcOf(url) {
+    if (/[?&]group_id=\d/.test(url)) return "";
+    var m = url.match(/[?&]shc=([^&#]+)/);
+    return m ? decodeURIComponent(m[1]) : "";
+  }
+  function openQueue(q) {
+    var todo = q.list.slice(q.pos).filter(function (e) { return e.shc; });
+    if (todo.length) {
+      location.href = LOOKUP_PAGE + "#bs=" + todo.map(function (e) { return e.shc.replace(/^\d+_/, ""); }).join(".");
+    } else {
+      location.href = q.list[q.pos].url;
+    }
+  }
+  function readResolved() {
+    var h = location.hash;
+    if (h.indexOf("#resolved=") !== 0) return;
+    history.replaceState(null, "", location.pathname + location.search);
+    var q = loadQueue();
+    if (!q) return;
+    var ids = {};
+    try {
+      JSON.parse(decodeURIComponent(h.slice(10))).forEach(function (r) { ids[r[0]] = r; });
+    } catch (e) { toast("Couldn't read the cart numbers. Try again."); return; }
+    var missed = [];
+    q.list = q.list.filter(function (e, i) {
+      if (i < q.pos || !e.shc) return true;
+      var r = ids[e.shc.replace(/^\d+_/, "")];
+      if (!r || !r[1]) { missed.push(e.name); return false; }
+      e.url = "https://m.shein.com/cart/share/landing?group_id=" + r[1] + "&local_country=" + encodeURIComponent(r[2] || "other") +
+        "&shc=" + encodeURIComponent(e.shc) + "&cart_share=1";
+      e.shc = "";
+      return true;
+    });
+    if (missed.length) {
+      openSheet('<h2>Some carts were not found</h2><p>Check these links: ' + esc(missed.join(", ")) + '</p>' +
+        (q.pos < q.list.length ? '<p class="muted">The other carts will open now.</p>' : '') +
+        '<div class="row"><button class="btn primary" id="rm-ok">OK</button></div>')
+        .querySelector("#rm-ok").addEventListener("click", function () {
+          closeSheet();
+          if (q.pos < q.list.length) location.href = q.list[q.pos].url;
+        });
+    }
+    if (q.pos >= q.list.length) { saveQueue(null); renderQueueList(); return; }
+    saveQueue(q);
+    if (!missed.length) location.href = q.list[q.pos].url;
+  }
+  window.addEventListener("hashchange", readResolved);
 
   // Called when "Get SKUs" brings back a cart while a list of carts is being added.
   function queueImport(q, items) {
@@ -1137,6 +1190,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
   // Waits up to 15 s for the products to load, so it can be clicked as soon as the page opens.
   function grabber(APP) {
     var tries = 0, note = null;
+    if (location.host === "api-shein.shein.com") { lookup(); return; }
     var seen, found;
     function walk(v, d) {
       if (!v || found || d > 400) return;
@@ -1162,13 +1216,29 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
         alert("No cart found on this page. Open the customer's Shein cart link first and wait until the products show.");
         return;
       }
+      showNote("Reading the cart...");
+      setTimeout(run, 500);
+    }
+    function lookup() {
+      var codes = location.hash.slice(1).replace(/^bs=/, "").split(".").filter(Boolean);
+      if (!codes.length) { alert("Start adding carts from the Box Sorter app first."); return; }
+      showNote("Finding " + codes.length + (codes.length > 1 ? " carts..." : " cart..."));
+      Promise.all(codes.map(function (c) {
+        return fetch("/h5/sharejump/appjump?link=" + encodeURIComponent(c)).then(function (r) { return r.text(); }).then(function (t) {
+          var id = t.match(/"shareId":"(\d+)"/), lc = t.match(/"localcountry":"(\w*)"/);
+          return [c, id ? id[1] : "", lc ? lc[1] : ""];
+        }, function () { return [c, "", ""]; });
+      })).then(function (rows) {
+        location.href = APP + String.fromCharCode(35) + "resolved=" + encodeURIComponent(JSON.stringify(rows));
+      });
+    }
+    function showNote(text) {
       if (!note) {
         note = document.createElement("div");
-        note.textContent = "Reading the cart...";
         note.style.cssText = "position:fixed;top:12px;left:0;right:0;margin:auto;width:max-content;z-index:2147483647;background:rgb(20,20,20);color:white;padding:10px 18px;border-radius:20px;font:15px sans-serif";
         document.body.appendChild(note);
       }
-      setTimeout(run, 500);
+      note.textContent = text;
     }
     function send() {
       var list = [].concat(found.normalProducts || [], found.outStock || [], found.unavailable || []);
@@ -1222,6 +1292,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
   renderSummary();
   if (state.boxId) { listen(); refetch(); }
   readImport();
+  readResolved();
   readLoad();
   readBox();
 })();
