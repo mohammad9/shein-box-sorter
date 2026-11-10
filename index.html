@@ -595,13 +595,17 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
 
   // ---------- customers view ----------
 
+  // Remember which "Items" sections the user opened or closed, so redraws
+  // after a sync don't snap them back to the default.
+  var itemsOpen = {};
   function renderCustomers() {
     var list = document.getElementById("cust-list");
     if (!state.customers.length) {
       list.innerHTML = '<div class="card muted">No customers yet. Follow the steps in <b>Setup</b> to add each customer\'s cart.</div>';
+      delete list.dataset.html;
       return;
     }
-    list.innerHTML = state.customers.map(function (c) {
+    var html = state.customers.map(function (c) {
       var total = 0, picked = 0;
       c.items.forEach(function (it) { total += it.qty; picked += Math.min(it.picked, it.qty); });
       var pct = total ? Math.round(picked / total * 100) : 0;
@@ -613,7 +617,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
         '<div class="bar"><i style="width:' + pct + '%;background:' + color(c) + '"></i></div>' +
         '<div class="small ' + (missing.length ? 'muted' : '') + '" style="' + (missing.length ? '' : 'color:var(--ok);font-weight:700') + '">' +
         (missing.length ? missing.length + ' item' + (missing.length > 1 ? 's' : '') + ' still missing' : '✓ Complete') + '</div>' +
-        '<details' + (missing.length && missing.length <= 6 ? ' open' : '') + '><summary>Items</summary><ul class="items">' +
+        '<details data-cust="' + esc(c.name) + '"' + ((c.name in itemsOpen ? itemsOpen[c.name] : missing.length && missing.length <= 6) ? ' open' : '') + '><summary>Items</summary><ul class="items">' +
         missing.concat(done).map(function (it) {
           return '<li class="' + (it.picked >= it.qty ? 'done' : '') + '">' +
             (it.img ? '<img alt="" loading="lazy" src="' + esc(imgSrc(it.img)) + '">' : '<img alt="">') +
@@ -623,6 +627,12 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
         '<div class="row" style="margin-top:10px"><button class="btn danger small" data-del="' + esc(c.id) + '">Remove customer</button></div>' +
         '</div>';
     }).join("");
+    if (html === list.dataset.html) return; // nothing changed: leave the page alone
+    list.dataset.html = html;
+    list.innerHTML = html;
+    list.querySelectorAll("details[data-cust]").forEach(function (d) {
+      d.addEventListener("toggle", function () { itemsOpen[d.dataset.cust] = d.open; });
+    });
     list.querySelectorAll("[data-del]").forEach(function (b) {
       b.addEventListener("click", function () { confirmSheet("Remove this customer and their items?", "Remove", function () {
         state.customers = state.customers.filter(function (c) { return c.id !== b.dataset.del; });
