@@ -120,6 +120,13 @@ nav.tabs button[aria-selected="true"] { color: var(--accent); }
 .items li .t b { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .items li .n { font-variant-numeric: tabular-nums; font-weight: 700; }
 .items li.done { opacity: .5; }
+.items li .qty {
+  width: 52px; padding: 6px 4px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface);
+  color: inherit; font: inherit; font-weight: 700; text-align: center; flex: none;
+}
+.items li .rm {
+  border: 0; background: none; color: var(--bad); font-size: 20px; line-height: 1; padding: 6px 8px; flex: none; cursor: pointer;
+}
 details summary { cursor: pointer; color: var(--accent); font-weight: 600; font-size: 13px; margin-top: 6px; }
 
 /* modal */
@@ -605,7 +612,10 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
       delete list.dataset.html;
       return;
     }
-    var html = state.customers.map(function (c) {
+    // Don't redraw under someone typing a quantity; it redraws once they finish.
+    var active = document.activeElement;
+    if (active && active.classList.contains("qty") && list.contains(active)) return;
+    var html = state.customers.map(function (c, ci) {
       var total = 0, picked = 0;
       c.items.forEach(function (it) { total += it.qty; picked += Math.min(it.picked, it.qty); });
       var pct = total ? Math.round(picked / total * 100) : 0;
@@ -622,7 +632,9 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
           return '<li class="' + (it.picked >= it.qty ? 'done' : '') + '">' +
             (it.img ? '<img alt="" loading="lazy" src="' + esc(imgSrc(it.img)) + '">' : '<img alt="">') +
             '<div class="t"><b>' + esc(it.name || it.sku) + '</b><span class="muted">Size ' + esc(it.size || '–') + ' · <span class="mono">' + esc(it.sku) + '</span></span></div>' +
-            '<span class="n">' + it.picked + '/' + it.qty + '</span></li>';
+            '<span class="n">' + it.picked + '/</span>' +
+            '<input class="qty" type="number" inputmode="numeric" min="1" max="99" value="' + it.qty + '" aria-label="Quantity" data-c="' + ci + '" data-i="' + c.items.indexOf(it) + '">' +
+            '<button class="rm" aria-label="Remove item" data-c="' + ci + '" data-i="' + c.items.indexOf(it) + '">×</button></li>';
         }).join("") + '</ul></details>' +
         '<div class="row" style="margin-top:10px"><button class="btn danger small" data-del="' + esc(c.id) + '">Remove customer</button></div>' +
         '</div>';
@@ -632,6 +644,32 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
     list.innerHTML = html;
     list.querySelectorAll("details[data-cust]").forEach(function (d) {
       d.addEventListener("toggle", function () { itemsOpen[d.dataset.cust] = d.open; });
+    });
+    list.querySelectorAll("input.qty").forEach(function (inp) {
+      inp.addEventListener("keydown", function (e) { if (e.key === "Enter") inp.blur(); });
+      inp.addEventListener("change", function () {
+        var it = state.customers[inp.dataset.c] && state.customers[inp.dataset.c].items[inp.dataset.i];
+        if (!it) return;
+        var n = Math.round(Number(inp.value));
+        if (!(n >= 1)) { inp.value = it.qty; return; } // to take it out, use × instead
+        it.qty = Math.min(n, 99);
+        if (it.picked > it.qty) it.picked = it.qty;
+        inp.blur();
+        save(); pushBox(); renderCustomers(); renderSummary();
+      });
+    });
+    list.querySelectorAll("button.rm").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var cust = state.customers[b.dataset.c], it = cust && cust.items[b.dataset.i];
+        if (!it) return;
+        confirmSheet("Remove " + (it.name || it.sku) + " (size " + (it.size || "–") + ") from " + cust.name + "?", "Remove", function () {
+          var idx = cust.items.indexOf(it);
+          if (idx < 0) return;
+          cust.items.splice(idx, 1);
+          lastAction = null; // undo points at item positions, which just shifted
+          save(); pushBox(); renderCustomers(); renderSummary();
+        });
+      });
     });
     list.querySelectorAll("[data-del]").forEach(function (b) {
       b.addEventListener("click", function () { confirmSheet("Remove this customer and their items?", "Remove", function () {
