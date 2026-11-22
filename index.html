@@ -1148,8 +1148,12 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
   // looked up first and the mobile cart page is opened directly. The lookup only works from a
   // page on Shein's share server, so "Get SKUs" does it there (see grabber) and sends the numbers back.
   var LOOKUP_PAGE = "https://api-shein.shein.com/h5/";
+  // Carts open on the UAE store. Without these Shein picks the country from the visitor's
+  // location (it showed Turkey). UAE is part of Shein's Gulf site, m.shein.com/ar, which
+  // defaults to Saudi prices unless the currency is given too.
+  var CART_SITE = "https://m.shein.com/ar", CART_COUNTRY = "AE", CART_CURRENCY = "AED";
   function shcOf(url) {
-    if (/[?&]group_id=\d/.test(url)) return "";
+    if (/[?&]group_id=[^&#]/.test(url)) return "";
     var m = url.match(/[?&]shc=([^&#]+)/);
     return m ? decodeURIComponent(m[1]) : "";
   }
@@ -1176,8 +1180,8 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
       if (i < q.pos || !e.shc) return true;
       var r = ids[e.shc.replace(/^\d+_/, "")];
       if (!r || !r[1]) { missed.push(e.name); return false; }
-      e.url = "https://m.shein.com/cart/share/landing?group_id=" + r[1] + "&local_country=" + encodeURIComponent(r[2] || "other") +
-        "&shc=" + encodeURIComponent(e.shc) + "&cart_share=1";
+      e.url = CART_SITE + "/cart/share/landing?group_id=" + encodeURIComponent(r[1]) + "&local_country=" + CART_COUNTRY +
+        "&shc=" + encodeURIComponent(e.shc) + "&cart_share=1&currency=" + CART_CURRENCY;
       e.shc = "";
       return true;
     });
@@ -1273,7 +1277,7 @@ ol.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; }
       showNote("Finding " + codes.length + (codes.length > 1 ? " carts..." : " cart..."));
       Promise.all(codes.map(function (c) {
         return fetch("/h5/sharejump/appjump?link=" + encodeURIComponent(c)).then(function (r) { return r.text(); }).then(function (t) {
-          var id = t.match(/"shareId":"(\d+)"/), lc = t.match(/"localcountry":"(\w*)"/);
+          var id = t.match(/"shareId":"([^"]+)"/), lc = t.match(/"localcountry":"(\w*)"/);
           return [c, id ? id[1] : "", lc ? lc[1] : ""];
         }, function () { return [c, "", ""]; });
       })).then(function (rows) {
